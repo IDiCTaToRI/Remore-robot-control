@@ -1,0 +1,150 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+using UnityEngine;
+
+namespace FfmpegUnity
+{
+    public class FfmpegCommandImpWinMonoBin : FfmpegCommandImpBase
+    {
+        StreamReader stdErr_ = null;
+        Thread stdErrThread_ = null;
+        List<string> stdErrList_ = new List<string>();
+        Process process_ = null;
+
+        bool sendQCommand_ = false;
+
+        public FfmpegCommandImpWinMonoBin(FfmpegCommand command) : base(command)
+        {
+        }
+
+        public override IEnumerator StartFfmpegCoroutine(string options)
+        {
+            options = ParseOptions(options);
+
+            string fileName = "ffmpeg";
+#if !FFMPEG_UNITY_USE_OUTER_WIN
+#if UNITY_EDITOR
+            fileName = FfmpegFileManager.GetManagedFilePath(Application.dataPath + "/FfmpegUnity/Bin/Windows/ffmpeg.exe");
+#else
+            fileName = Application.streamingAssetsPath + "/_FfmpegUnity_temp/ffmpeg.exe";
+#endif
+#endif
+
+            ProcessStartInfo psInfo = new ProcessStartInfo()
+            {
+                FileName = fileName,
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                RedirectStandardInput = true,
+                Arguments = options,
+            };
+
+            process_ = Process.Start(psInfo);
+            stdErr_ = process_.StandardError;
+            stdErrThread_ = new Thread(() =>
+            {
+                while (!LoopExit)
+                {
+                    try
+                    {
+                        Task<string> strTask = stdErr_.ReadLineAsync();
+                        while (!strTask.IsCompleted && !LoopExit)
+                        {
+                            Thread.Sleep(16);
+                        }
+                        if (LoopExit)
+                        {
+                            break;
+                        }
+                        string str = strTask.Result;
+                        if (str == null)
+                        {
+                            LoopExit = true;
+                            break;
+                        }
+                        if (str.StartsWith("Press [q] to stop"))
+                        {
+                            sendQCommand_ = true;
+                        }
+                        stdErrList_.Add(str);
+                    }
+                    catch (Exception)
+                    {
+                        LoopExit = true;
+                        break;
+                    }
+                }
+            });
+            stdErrThread_.Start();
+
+            yield break;
+        }
+
+        public override void StopFfmpeg()
+        {
+            if (process_ != null)
+            {
+                if (!process_.HasExited && sendQCommand_)
+                {
+                    process_.StandardInput.Write("q");
+                    process_.WaitForExit();
+                }
+                if (!process_.HasExited)
+                {
+                    process_.CloseMainWindow();
+                    process_.WaitForExit();
+                }
+                process_.Dispose();
+                process_ = null;
+            }
+
+            if (stdErrThread_ != null)
+            {
+                stdErrThread_.Join();
+                stdErrThread_ = null;
+            }
+
+            if (stdErr_ != null)
+            {
+                stdErr_.Dispose();
+                stdErr_ = null;
+            }
+
+            sendQCommand_ = false;
+        }
+
+        public override bool IsRunning
+        {
+            get
+            {
+                return !LoopExit && IsAlreadyBuild;
+            }
+        }
+
+        public override string StdErrLine(List<string> stdErrListForGetLine)
+        {
+            string ret;
+            if (stdErrList_ == null)
+            {
+                return null;
+            }
+            lock (stdErrList_)
+            {
+                if (stdErrList_.Count <= 0)
+                {
+                    return null;
+                }
+                ret = stdErrList_[0];
+                stdErrList_.RemoveAt(0);
+            }
+            stdErrListForGetLine.Add(ret);
+            return ret;
+        }
+    }
+}
